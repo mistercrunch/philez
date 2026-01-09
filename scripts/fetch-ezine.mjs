@@ -81,6 +81,53 @@ function slugify(str) {
     .replace(/^-|-$/g, '')
 }
 
+// Extract numeric parts for sorting: "40hex-1-002" -> [1, 2], "noway-3" -> [3]
+function extractSortKey(slug) {
+  const nums = slug.match(/\d+/g) || []
+  return nums.map(n => parseInt(n, 10))
+}
+
+// Compare two slugs numerically
+function compareSlugNumerically(a, b) {
+  const keysA = extractSortKey(a)
+  const keysB = extractSortKey(b)
+
+  for (let i = 0; i < Math.max(keysA.length, keysB.length); i++) {
+    const numA = keysA[i] ?? -1
+    const numB = keysB[i] ?? -1
+    if (numA !== numB) return numA - numB
+  }
+  return a.localeCompare(b)
+}
+
+// Create a clean display name from filename
+function makeDisplayName(filename, slug, ezineName) {
+  // Remove ezine name prefix from slug to get just the issue/part numbers
+  const ezineSlug = slugify(ezineName)
+  let numPart = slug.startsWith(ezineSlug) ? slug.slice(ezineSlug.length) : slug
+  numPart = numPart.replace(/^-+/, '') // remove leading dashes
+
+  // Extract numbers from the remaining part
+  const nums = numPart.match(/\d+/g) || []
+
+  if (nums.length >= 2) {
+    // Has issue and part: "Issue 1, Part 2" or "1.002"
+    return `#${nums[0]}.${nums.slice(1).join('.')}`
+  } else if (nums.length === 1) {
+    // Just issue number: "#1"
+    return `#${nums[0]}`
+  }
+
+  // No numbers - clean up the filename
+  const cleaned = filename
+    .replace(/\.[^.]+$/, '') // remove extension
+    .replace(/[-_]/g, ' ')   // dashes/underscores to spaces
+    .replace(/\s+/g, ' ')    // collapse spaces
+    .trim()
+
+  return cleaned || slug
+}
+
 function extractIssueNumber(filename) {
   // Try various patterns: issue01, #1, -001, _1, etc.
   const patterns = [
@@ -237,60 +284,130 @@ async function processEzine(ezineName) {
     }
   }
 
-  // Find all text files in the archive directory
+  // Find all text files, grouped by their source folder (archive)
   const allTextFiles = findTextFiles(ezineArchiveDir)
   console.log(`Found ${allTextFiles.length} text files to convert`)
 
-  // Convert each text file to markdown
-  const converted = []
+  // Group files by their immediate parent folder (which corresponds to the zip)
+  const filesByFolder = {}
   for (const txtFile of allTextFiles) {
-    try {
-      const buffer = readFileSync(txtFile)
-      const utf8Content = convertCP437ToUTF8(buffer)
-
-      // Skip tiny files or binary files that slipped through
-      if (utf8Content.length < 100) continue
-      if (utf8Content.includes('\x00')) continue
-
-      const relativePath = txtFile.replace(ezineArchiveDir + '/', '')
-      const ext = extname(txtFile)
-      const base = basename(txtFile, ext)
-      // Preserve numeric extensions (like .2, .3, .001) in the slug
-      const isNumericExt = /^\.\d+$/.test(ext)
-      const slugBase = isNumericExt ? `${base}-${ext.slice(1)}` : base
-      const slug = slugify(slugBase)
-      const mdPath = join(ezinePagesDir, `${slug}.mdx`)
-
-      const markdown = convertToMarkdown(utf8Content, txtFile, ezineName)
-      writeFileSync(mdPath, markdown)
-
-      converted.push({ slug, name: basename(txtFile), path: relativePath })
-      console.log(`  ✓ ${relativePath}`)
-    } catch (err) {
-      console.log(`  ✗ ${txtFile}: ${err.message}`)
-    }
+    const relativePath = txtFile.replace(ezineArchiveDir + '/', '')
+    const parts = relativePath.split('/')
+    const folder = parts.length > 1 ? parts[0] : '_root'
+    if (!filesByFolder[folder]) filesByFolder[folder] = []
+    filesByFolder[folder].push(txtFile)
   }
 
-  // Generate index page for this ezine
+  // Process each folder
+  const issues = [] // { folderSlug, displayName, files: [...] }
+
+  for (const [folder, files] of Object.entries(filesByFolder)) {
+    const folderSlug = folder === '_root' ? null : slugify(folder)
+    const issueDir = folderSlug ? join(ezinePagesDir, folderSlug) : ezinePagesDir
+
+    if (folderSlug) {
+      mkdirSync(issueDir, { recursive: true })
+    }
+
+    const converted = []
+
+    for (const txtFile of files) {
+      try {
+        const buffer = readFileSync(txtFile)
+        const utf8Content = convertCP437ToUTF8(buffer)
+
+        // Skip tiny files or binary files that slipped through
+        if (utf8Content.length < 100) continue
+        if (utf8Content.includes('\x00')) continue
+
+        const ext = extname(txtFile)
+        const base = basename(txtFile, ext)
+        // Preserve numeric extensions (like .2, .3, .001) in the slug
+        const isNumericExt = /^\.\d+$/.test(ext)
+        const slugBase = isNumericExt ? `${base}-${ext.slice(1)}` : base
+        const slug = slugify(slugBase)
+        const mdPath = join(issueDir, `${slug}.mdx`)
+
+        const markdown = convertToMarkdown(utf8Content, txtFile, ezineName)
+        writeFileSync(mdPath, markdown)
+
+        const name = basename(txtFile)
+        const displayName = makeDisplayName(name, slug, ezineName)
+        converted.push({ slug, name, displayName })
+        console.log(`  ✓ ${folder}/${name}`)
+      } catch (err) {
+        console.log(`  ✗ ${txtFile}: ${err.message}`)
+      }
+    }
+
+    if (converted.length === 0) continue
+
+    // Sort files in this folder
+    converted.sort((a, b) => compareSlugNumerically(a.slug, b.slug))
+
+    // Generate _meta.json for this folder
+    if (folderSlug) {
+      const folderMeta = {}
+      converted.forEach(f => { folderMeta[f.slug] = f.displayName })
+      writeFileSync(join(issueDir, '_meta.json'), JSON.stringify(folderMeta, null, 2))
+    }
+
+    // Create a nice display name for the folder/issue
+    const folderDisplayName = folderSlug
+      ? makeDisplayName(folder, folderSlug, ezineName)
+      : ezineName
+
+    issues.push({
+      folderSlug,
+      displayName: folderDisplayName,
+      files: converted
+    })
+  }
+
+  // Sort issues numerically
+  issues.sort((a, b) => {
+    if (!a.folderSlug) return -1
+    if (!b.folderSlug) return 1
+    return compareSlugNumerically(a.folderSlug, b.folderSlug)
+  })
+
+  // Generate main index page
+  const totalFiles = issues.reduce((sum, i) => sum + i.files.length, 0)
   const indexContent = `# ${ezineName}
 
 Browse all files from the **${ezineName}** ezine archive.
 
 **Source:** [autistici.org/ezine/${ezineName}](${ezineUrl})
 
-## Files
+**Total files:** ${totalFiles}
 
-${converted.map(f => `- [${f.name}](/ezines/${ezineName}/${f.slug})`).join('\n')}
+## Issues
+
+${issues.map(issue => {
+    if (issue.folderSlug) {
+      return `- [${issue.displayName}](/ezines/${ezineName}/${issue.folderSlug}) (${issue.files.length} files)`
+    } else {
+      return issue.files.map(f => `- [${f.displayName}](/ezines/${ezineName}/${f.slug})`).join('\n')
+    }
+  }).join('\n')}
 `
   writeFileSync(join(ezinePagesDir, 'index.mdx'), indexContent)
 
-  // Generate _meta.json
+  // Generate main _meta.json
   const meta = { index: ezineName }
-  converted.forEach(f => { meta[f.slug] = f.name })
+  for (const issue of issues) {
+    if (issue.folderSlug) {
+      meta[issue.folderSlug] = issue.displayName
+    } else {
+      // Root-level files
+      issue.files.forEach(f => { meta[f.slug] = f.displayName })
+    }
+  }
   writeFileSync(join(ezinePagesDir, '_meta.json'), JSON.stringify(meta, null, 2))
 
-  console.log(`\n✓ Converted ${converted.length} files for ${ezineName}`)
-  return converted.length
+  const totalConverted = issues.reduce((sum, i) => sum + i.files.length, 0)
+  console.log(`\n✓ Converted ${totalConverted} files for ${ezineName}`)
+  return totalConverted
 }
 
 // Main

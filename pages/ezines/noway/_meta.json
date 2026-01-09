@@ -1,8 +1,7 @@
 {
   "index": "noway",
-  "noway1": "NOWAY1.TXT",
-  "file-id": "FILE_ID.DIZ",
-  "noway-2": "NOWAY.2",
-  "noway-3": "NOWAY.3",
-  "noway4": "noway4.txt"
+  "noway1": "#1",
+  "noway2": "#2",
+  "noway3": "#3",
+  "noway4": "#4"
 }
