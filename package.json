@@ -1,7 +1,7 @@
 {
-  "name": "npc-tribute",
+  "name": "philez",
   "version": "1.0.0",
-  "description": "A tribute to Northern Phun Co. - Quebec's 418 underground e-zine (1992-1994)",
+  "description": "PhileZ - the BBS-era underground ezine archive",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
